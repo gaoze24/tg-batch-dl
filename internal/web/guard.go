@@ -10,7 +10,7 @@ import (
 //   - Host must be 127.0.0.1/localhost on our port (blocks DNS-rebinding),
 //   - browsers' Sec-Fetch-Site must be same-origin or none (blocks other sites' forms, images and fetches),
 //   - API calls must carry X-TGDL: 1, a custom header that cross-site requests can't send without a CORS preflight
-//     this server never approves. Image endpoints (<img> can't set headers) rely on the first two checks.
+//     this server never approves. Image and video endpoints (<img>/<video> can't set headers) rely on the first two checks.
 func guard(port int, next http.Handler) http.Handler {
 	allowed := map[string]bool{
 		fmt.Sprintf("127.0.0.1:%d", port): true,
@@ -39,5 +39,5 @@ func guard(port int, next http.Handler) http.Handler {
 
 func isImage(r *http.Request) bool {
 	return r.Method == http.MethodGet &&
-		(strings.HasPrefix(r.URL.Path, "/api/thumb/") || r.URL.Path == "/api/login/qr.png")
+		(strings.HasPrefix(r.URL.Path, "/api/thumb/") || strings.HasPrefix(r.URL.Path, "/api/stream/") || r.URL.Path == "/api/login/qr.png")
 }

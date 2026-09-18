@@ -87,6 +87,12 @@
           <div class="spacer"></div>
           <button id="btn-all" class="btn">下载全部</button>
         </div>
+        <div class="rangebar">
+          <span class="muted small">筛选</span>
+          <label class="inline">大小 <input id="f-min-size" type="number" min="0" step="1" placeholder="最小"> – <input id="f-max-size" type="number" min="0" step="1" placeholder="最大"> MB</label>
+          <label class="inline" id="dur-filter">时长 <input id="f-min-dur" type="number" min="0" step="1" placeholder="最短"> – <input id="f-max-dur" type="number" min="0" step="1" placeholder="最长"> 分钟</label>
+          <button id="btn-clear-range" class="btn link" hidden>清除筛选</button>
+        </div>
         <div class="selbar">
           <span id="sel-info"></span>
           <div class="spacer"></div>
@@ -95,7 +101,7 @@
           <button id="btn-select-none" class="btn">取消选择</button>
           <button id="btn-download" class="btn primary" disabled>下载所选</button>
         </div>
-        <p class="muted small hint">点击卡片选择，按住 Shift 点击可以连续选一段。带「已下载」标记的文件再次下载时会自动跳过。</p>
+        <p class="muted small hint">点击卡片选择，按住 Shift 点击可以连续选一段；点「预览」在线播放。带「已下载」标记的文件再次下载时会自动跳过。</p>
         <div id="grid" class="grid"></div>
         <div id="grid-status" class="grid-status"></div>
         <div id="sentinel"></div>
@@ -148,6 +154,23 @@
   <div class="dialog-actions">
     <button id="links-cancel" class="btn">取消</button>
     <button id="links-submit" class="btn primary">加入下载</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-preview" class="dialog preview">
+  <div class="pv-head">
+    <h3 id="pv-title"></h3>
+    <button id="pv-close" class="btn icon" title="关闭">✕</button>
+  </div>
+  <div id="pv-media" class="pv-media"></div>
+  <p id="pv-meta" class="muted small"></p>
+  <p id="pv-caption" class="pv-caption" hidden></p>
+  <div class="dialog-actions">
+    <button id="pv-prev" class="btn">← 上一个</button>
+    <button id="pv-next" class="btn">下一个 →</button>
+    <div class="spacer"></div>
+    <button id="pv-select" class="btn">选择</button>
+    <button id="pv-download" class="btn primary">下载这个</button>
   </div>
 </dialog>
 

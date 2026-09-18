@@ -47,15 +47,16 @@ func (s Status) finished() bool {
 type Source interface {
 	Session() (*tg.Client, dcpool.Pool, error)
 	Peer(ctx context.Context, ref string) (tgc.Chat, error)
-	ListMediaIDs(ctx context.Context, chat tgc.Chat, filter string, progress func(int)) ([]int, error)
+	ListMediaIDs(ctx context.Context, chat tgc.Chat, filter string, r tgc.Range, progress func(int)) ([]int, error)
 }
 
-// Spec says what to download: explicit message ids, or every media message matching Filter.
+// Spec says what to download: explicit message ids, or every media message matching Filter and Match.
 type Spec struct {
 	Ref    string
 	IDs    []int
 	All    bool
 	Filter string
+	Match  tgc.Range
 }
 
 type FileView struct {
@@ -390,7 +391,7 @@ func (m *Manager) run(ctx context.Context, j *job) error {
 	}
 	ids := j.spec.IDs
 	if j.spec.All {
-		ids, err = m.src.ListMediaIDs(ctx, chat, j.spec.Filter, func(n int) {
+		ids, err = m.src.ListMediaIDs(ctx, chat, j.spec.Filter, j.spec.Match, func(n int) {
 			m.mu.Lock()
 			j.total, j.message = n, fmt.Sprintf("正在列出媒体消息…已找到 %d 个", n)
 			m.mu.Unlock()

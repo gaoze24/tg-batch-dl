@@ -17,6 +17,10 @@ const S = {
   chat: null,          // current chat {ref,title,...}
   filter: "video",
   items: [],
+  view: [],            // items passing the size/duration filter, in grid order
+  nodes: new Map(),    // message id -> card element
+  range: null,
+  previewIndex: -1,
   next: 0,
   total: 0,
   done: false,
@@ -229,10 +233,47 @@ function openChat(chat) {
 }
 
 // ---------- media grid ----------
+// S.items holds everything loaded so far; S.view the ones passing the size/duration filter, in grid order.
+
+const MB = 1024 * 1024;
+
+function readRange() {
+  const num = (id) => {
+    const v = parseFloat($(id).value);
+    return v > 0 ? v : 0;
+  };
+  return {
+    min_size: Math.round(num("f-min-size") * MB),
+    max_size: Math.round(num("f-max-size") * MB),
+    min_duration: num("f-min-dur") * 60,
+    max_duration: num("f-max-dur") * 60,
+  };
+}
+
+// mirrors tgc.Range.Match on the server
+function matches(item, r) {
+  if ((r.min_size && item.size < r.min_size) || (r.max_size && item.size > r.max_size)) return false;
+  if (item.kind === "video" && ((r.min_duration && item.duration < r.min_duration) || (r.max_duration && item.duration > r.max_duration))) return false;
+  return true;
+}
+
+function rangeActive(r) {
+  return !!(r.min_size || r.max_size || r.min_duration || r.max_duration);
+}
+
+function describeRange(r) {
+  const parts = [];
+  if (r.min_size || r.max_size) parts.push(`大小 ${r.min_size ? fmtBytes(r.min_size) : "0"} – ${r.max_size ? fmtBytes(r.max_size) : "不限"}`);
+  if (r.min_duration || r.max_duration) parts.push(`时长 ${r.min_duration / 60 || 0} – ${r.max_duration ? r.max_duration / 60 + " 分钟" : "不限"}`);
+  return parts.join("，");
+}
 
 function resetGrid() {
   S.token++;
   S.items = [];
+  S.view = [];
+  S.nodes = new Map();
+  S.range = readRange();
   S.next = 0;
   S.total = 0;
   S.done = false;
@@ -241,34 +282,70 @@ function resetGrid() {
   S.lastIndex = -1;
   $("grid").replaceChildren();
   document.querySelectorAll("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === S.filter));
+  show("dur-filter", S.filter === "video" || S.filter === "media");
   updateSelbar();
   loadMore();
+}
+
+function appendCard(item) {
+  const index = S.view.length;
+  S.view.push(item);
+  const node = card(item, index);
+  S.nodes.set(item.id, node);
+  $("grid").append(node);
+}
+
+function applyRange() {
+  S.range = readRange();
+  S.view = [];
+  S.nodes = new Map();
+  $("grid").replaceChildren();
+  for (const item of S.items) if (matches(item, S.range)) appendCard(item);
+  const visible = new Set(S.view.map((i) => i.id));
+  for (const id of [...S.selected]) if (!visible.has(id)) S.selected.delete(id); // hidden items can't stay selected
+  S.lastIndex = -1;
+  updateSelbar();
+  updateGridStatus();
+  if (!S.done && sentinelVisible()) loadMore();
+}
+
+function updateGridStatus() {
+  let text = "";
+  if (S.loading) text = "加载中…";
+  else if (!S.items.length) text = S.done ? `这个聊天里没有${FILTER_LABEL[S.filter]}` : "";
+  else if (!S.view.length) text = S.done ? "没有符合筛选条件的文件" : "正在查找符合条件的文件…";
+  else if (S.done) text = "已全部加载";
+  $("grid-status").textContent = text;
 }
 
 async function loadMore() {
   if (!S.chat || S.loading || S.done) return;
   S.loading = true;
   const token = S.token;
-  $("grid-status").textContent = "加载中…";
+  updateGridStatus();
   try {
     const url = `/api/chats/${encodeURIComponent(S.chat.ref)}/media?filter=${S.filter}&offset=${S.next}`;
     const page = await api(url);
     if (token !== S.token) return;
-    const start = S.items.length;
     S.items.push(...page.items);
     S.total = page.total;
     S.next = page.next_offset;
     S.done = !page.next_offset;
-    const grid = $("grid");
-    page.items.forEach((item, i) => grid.append(card(item, start + i)));
-    $("grid-status").textContent = S.items.length ? (S.done ? "已全部加载" : "") : `这个聊天里没有${FILTER_LABEL[S.filter]}`;
+    for (const item of page.items) if (matches(item, S.range)) appendCard(item);
     updateSelbar();
   } catch (e) {
-    if (token === S.token) $("grid-status").textContent = "加载失败：" + e.message;
+    if (token === S.token) {
+      S.loading = false;
+      $("grid-status").textContent = "加载失败：" + e.message;
+    }
+    return;
   } finally {
     if (token === S.token) S.loading = false;
   }
-  if (token === S.token && !S.done && sentinelVisible()) loadMore();
+  if (token !== S.token) return;
+  updateGridStatus();
+  // with a strict filter a page may add nothing visible: keep going while the bottom is on screen
+  if (!S.done && sentinelVisible()) loadMore();
 }
 
 function sentinelVisible() {
@@ -278,7 +355,6 @@ function sentinelVisible() {
 
 function card(item, index) {
   const c = el("div", "item");
-  c.dataset.index = index;
   const thumb = el("div", "thumb");
   if (item.thumb) {
     const img = new Image();
@@ -297,6 +373,14 @@ function card(item, index) {
     c.classList.add("downloaded");
   }
   thumb.append(el("span", "check"));
+  if (previewable(item)) {
+    const pv = el("button", "pv-btn", item.kind === "video" ? "▶ 预览" : "预览");
+    pv.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openPreview(index);
+    });
+    thumb.append(pv);
+  }
 
   const meta = el("div", "meta");
   meta.append(el("div", "name", firstLine(item.caption) || item.name));
@@ -308,9 +392,12 @@ function card(item, index) {
   return c;
 }
 
+function previewable(item) {
+  return item.kind === "video" || item.kind === "photo" || (item.mime || "").startsWith("image/");
+}
+
 function toggle(index, range) {
-  const item = S.items[index];
-  const on = !S.selected.has(item.id);
+  const on = !S.selected.has(S.view[index].id);
   if (range && S.lastIndex >= 0) {
     const [a, b] = S.lastIndex < index ? [S.lastIndex, index] : [index, S.lastIndex];
     for (let i = a; i <= b; i++) setSelected(i, on);
@@ -322,30 +409,37 @@ function toggle(index, range) {
 }
 
 function setSelected(index, on) {
-  const id = S.items[index].id;
+  const id = S.view[index].id;
   if (on) S.selected.add(id); else S.selected.delete(id);
-  const node = $("grid").children[index];
+  const node = S.nodes.get(id);
   if (node) node.classList.toggle("selected", on);
 }
 
 function updateSelbar() {
-  const bytes = S.items.filter((i) => S.selected.has(i.id)).reduce((sum, i) => sum + i.size, 0);
-  const loaded = S.total && S.total !== S.items.length ? `已加载 ${S.items.length} / 共 ${S.total} 个` : `共 ${S.items.length} 个`;
-  $("sel-info").textContent = S.selected.size ? `${loaded} · 已选 ${S.selected.size} 个（${fmtBytes(bytes)}）` : loaded;
+  const bytes = S.view.filter((i) => S.selected.has(i.id)).reduce((sum, i) => sum + i.size, 0);
+  let info = S.total && !S.done ? `已加载 ${S.items.length} / 共 ${S.total} 个` : `共 ${S.items.length} 个`;
+  if (rangeActive(S.range || {})) info += ` · 符合筛选 ${S.view.length} 个`;
+  if (S.selected.size) info += ` · 已选 ${S.selected.size} 个（${fmtBytes(bytes)}）`;
+  $("sel-info").textContent = info;
   $("btn-download").disabled = S.selected.size === 0;
   $("btn-download").textContent = S.selected.size ? `下载所选（${S.selected.size}）` : "下载所选";
-  $("btn-all").textContent = `下载全部${FILTER_LABEL[S.filter]}`;
+  $("btn-all").textContent = rangeActive(S.range || {}) ? `下载全部符合筛选的${FILTER_LABEL[S.filter]}` : `下载全部${FILTER_LABEL[S.filter]}`;
+  show("btn-clear-range", rangeActive(S.range || {}));
+}
+
+async function submitIds(ids) {
+  await post("/api/jobs", { ref: S.chat.ref, ids });
+  toast(`已加入下载：${ids.length} 个文件`);
+  openDrawer();
 }
 
 async function downloadSelected() {
   if (!S.selected.size) return;
   try {
-    await post("/api/jobs", { ref: S.chat.ref, ids: [...S.selected] });
-    toast(`已加入下载：${S.selected.size} 个文件`);
+    await submitIds([...S.selected]);
     S.selected.clear();
     document.querySelectorAll("#grid .item.selected").forEach((n) => n.classList.remove("selected"));
     updateSelbar();
-    openDrawer();
   } catch (e) {
     toast(e.message, "error");
   }
@@ -353,15 +447,111 @@ async function downloadSelected() {
 
 async function downloadAll() {
   const what = FILTER_LABEL[S.filter];
-  const count = S.total ? `全部 ${S.total} 个` : "全部";
-  if (!confirm(`下载「${S.chat.title}」里${count}${what}？\n已经下载过的文件会自动跳过。`)) return;
+  const range = S.range || {};
+  const scope = rangeActive(range) ? `所有符合筛选（${describeRange(range)}）的${what}` : `${S.total ? "全部 " + S.total + " 个" : "全部"}${what}`;
+  if (!confirm(`下载「${S.chat.title}」里${scope}？\n已经下载过的文件会自动跳过。`)) return;
   try {
-    await post("/api/jobs", { ref: S.chat.ref, all: true, filter: S.filter });
+    await post("/api/jobs", { ref: S.chat.ref, all: true, filter: S.filter, match: range });
     toast("已加入下载");
     openDrawer();
   } catch (e) {
     toast(e.message, "error");
   }
+}
+
+// ---------- preview ----------
+
+function openPreview(index) {
+  S.previewIndex = index;
+  renderPreview();
+  const dlg = $("dlg-preview");
+  if (!dlg.open) dlg.showModal();
+}
+
+function stopPreviewMedia() {
+  const v = $("pv-media").querySelector("video");
+  if (v) {
+    v.pause();
+    v.removeAttribute("src");
+    v.load(); // aborts the stream so the program stops fetching from Telegram
+  }
+}
+
+function renderPreview() {
+  const item = S.view[S.previewIndex];
+  if (!item) return;
+  stopPreviewMedia();
+  const box = $("pv-media");
+  const src = `/api/stream/${encodeURIComponent(S.chat.ref)}/${item.id}`;
+  let node;
+  if (item.kind === "video") {
+    node = document.createElement("video");
+    node.controls = true;
+    node.autoplay = true;
+    node.preload = "metadata";
+    node.addEventListener("error", () => {
+      box.replaceChildren(el("p", "error", "浏览器播放不了这个视频（可能是 MKV、HEVC 等格式），可以下载后用本地播放器看。"));
+    });
+    node.src = src;
+  } else if (previewable(item)) {
+    node = new Image();
+    node.alt = "";
+    node.addEventListener("error", () => box.replaceChildren(el("p", "error", "图片加载失败")));
+    node.src = src;
+  } else {
+    node = el("p", "muted", "这种文件不支持预览");
+  }
+  box.replaceChildren(node);
+  $("pv-title").textContent = firstLine(item.caption) || item.name;
+  const dims = item.width ? `${item.width}×${item.height}` : "";
+  $("pv-meta").textContent = [item.name, fmtBytes(item.size), item.duration ? fmtDur(item.duration) : "", dims, fmtDate(item.date), item.downloaded ? "已下载" : ""]
+    .filter(Boolean).join(" · ");
+  $("pv-caption").textContent = item.caption || "";
+  show("pv-caption", !!item.caption);
+  $("pv-prev").disabled = S.previewIndex <= 0;
+  $("pv-next").disabled = S.previewIndex >= S.view.length - 1;
+  $("pv-select").textContent = S.selected.has(item.id) ? "取消选择" : "选择";
+}
+
+function movePreview(delta) {
+  const next = S.previewIndex + delta;
+  if (next < 0 || next >= S.view.length) return;
+  S.previewIndex = next;
+  renderPreview();
+  const node = S.nodes.get(S.view[next].id);
+  if (node) node.scrollIntoView({ block: "nearest" });
+}
+
+function bindPreview() {
+  const dlg = $("dlg-preview");
+  dlg.addEventListener("close", stopPreviewMedia);
+  $("pv-close").addEventListener("click", () => dlg.close());
+  $("pv-prev").addEventListener("click", () => movePreview(-1));
+  $("pv-next").addEventListener("click", () => movePreview(1));
+  $("pv-select").addEventListener("click", () => {
+    const item = S.view[S.previewIndex];
+    setSelected(S.previewIndex, !S.selected.has(item.id));
+    S.lastIndex = S.previewIndex;
+    updateSelbar();
+    renderPreviewButtons();
+  });
+  $("pv-download").addEventListener("click", async () => {
+    try {
+      await submitIds([S.view[S.previewIndex].id]);
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  });
+  dlg.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "VIDEO") return; // arrow keys seek inside the player
+    if (e.key === "ArrowLeft") movePreview(-1);
+    if (e.key === "ArrowRight") movePreview(1);
+  });
+}
+
+function renderPreviewButtons() {
+  const item = S.view[S.previewIndex];
+  if (item) $("pv-select").textContent = S.selected.has(item.id) ? "取消选择" : "选择";
 }
 
 function bindMain() {
@@ -372,17 +562,28 @@ function bindMain() {
     S.filter = b.dataset.filter;
     resetGrid();
   }));
+  let rangeTimer = null;
+  for (const id of ["f-min-size", "f-max-size", "f-min-dur", "f-max-dur"]) {
+    $(id).addEventListener("input", () => {
+      clearTimeout(rangeTimer);
+      rangeTimer = setTimeout(applyRange, 400);
+    });
+  }
+  $("btn-clear-range").addEventListener("click", () => {
+    for (const id of ["f-min-size", "f-max-size", "f-min-dur", "f-max-dur"]) $(id).value = "";
+    applyRange();
+  });
   $("btn-select-all").addEventListener("click", () => {
-    S.items.forEach((_, i) => setSelected(i, true));
+    S.view.forEach((_, i) => setSelected(i, true));
     updateSelbar();
   });
   $("btn-select-new").addEventListener("click", () => {
-    S.items.forEach((item, i) => setSelected(i, !item.downloaded));
+    S.view.forEach((item, i) => setSelected(i, !item.downloaded));
     updateSelbar();
     if (!S.done) toast("只包含已经加载出来的文件；往下滚动可以加载更多");
   });
   $("btn-select-none").addEventListener("click", () => {
-    S.items.forEach((_, i) => setSelected(i, false));
+    S.view.forEach((_, i) => setSelected(i, false));
     S.lastIndex = -1;
     updateSelbar();
   });
@@ -391,6 +592,7 @@ function bindMain() {
   new IntersectionObserver((entries) => {
     if (entries.some((e) => e.isIntersecting)) loadMore();
   }, { rootMargin: "400px" }).observe($("sentinel"));
+  bindPreview();
 }
 
 // ---------- jobs ----------

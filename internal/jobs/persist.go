@@ -7,28 +7,31 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/gaoze24/tg-batch-dl/internal/tgc"
 )
 
 // saved is the on-disk form of a job (tgdl-data/jobs.json), enough to show it again and restart it.
 type saved struct {
-	ID        string   `json:"id"`
-	Seq       int      `json:"seq"`
-	Title     string   `json:"title"`
-	Ref       string   `json:"ref"`
-	IDs       []int    `json:"ids,omitempty"`
-	All       bool     `json:"all,omitempty"`
-	Filter    string   `json:"filter,omitempty"`
-	Dest      string   `json:"dest"`
-	Status    Status   `json:"status"`
-	Message   string   `json:"message,omitempty"`
-	Total     int      `json:"total"`
-	Done      int      `json:"done"`
-	Existing  int      `json:"existing"`
-	Failed    int      `json:"failed"`
-	FailedIDs []int    `json:"failed_ids,omitempty"`
-	Errors    []string `json:"errors,omitempty"`
-	Created   int64    `json:"created"`
-	Ended     int64    `json:"ended,omitempty"`
+	ID        string    `json:"id"`
+	Seq       int       `json:"seq"`
+	Title     string    `json:"title"`
+	Ref       string    `json:"ref"`
+	IDs       []int     `json:"ids,omitempty"`
+	All       bool      `json:"all,omitempty"`
+	Filter    string    `json:"filter,omitempty"`
+	Match     tgc.Range `json:"match,omitempty"`
+	Dest      string    `json:"dest"`
+	Status    Status    `json:"status"`
+	Message   string    `json:"message,omitempty"`
+	Total     int       `json:"total"`
+	Done      int       `json:"done"`
+	Existing  int       `json:"existing"`
+	Failed    int       `json:"failed"`
+	FailedIDs []int     `json:"failed_ids,omitempty"`
+	Errors    []string  `json:"errors,omitempty"`
+	Created   int64     `json:"created"`
+	Ended     int64     `json:"ended,omitempty"`
 }
 
 // saveLocked writes all jobs; must be called with m.mu held. Failures are logged, never fatal.
@@ -39,7 +42,7 @@ func (m *Manager) saveLocked() {
 	list := make([]saved, 0, len(m.jobs))
 	for _, j := range m.jobs {
 		s := saved{
-			ID: j.id, Seq: j.seq, Title: j.title, Ref: j.spec.Ref, IDs: j.spec.IDs, All: j.spec.All, Filter: j.spec.Filter,
+			ID: j.id, Seq: j.seq, Title: j.title, Ref: j.spec.Ref, IDs: j.spec.IDs, All: j.spec.All, Filter: j.spec.Filter, Match: j.spec.Match,
 			Dest: j.dest, Status: j.status, Message: j.message,
 			Total: j.total, Done: j.done, Existing: j.existing, Failed: j.failed, FailedIDs: j.failedID, Errors: j.errors,
 			Created: j.created.Unix(),
@@ -80,7 +83,7 @@ func (m *Manager) load() {
 	for _, s := range list {
 		j := &job{
 			id: s.ID, seq: s.Seq, title: s.Title, dest: s.Dest,
-			spec:   Spec{Ref: s.Ref, IDs: s.IDs, All: s.All, Filter: s.Filter},
+			spec:   Spec{Ref: s.Ref, IDs: s.IDs, All: s.All, Filter: s.Filter, Match: s.Match},
 			status: s.Status, message: s.Message,
 			total: s.Total, done: s.Done, existing: s.Existing, failed: s.Failed, failedID: s.FailedIDs, errors: s.Errors,
 			active:  map[int64]*activeFile{},

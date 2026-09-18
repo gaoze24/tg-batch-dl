@@ -76,6 +76,7 @@ type Client struct {
 
 	chats  chatCache
 	thumbs *thumbCache
+	files  fileCache
 }
 
 // New prepares a client; appID 0 means Telegram Desktop's public credentials.
@@ -267,6 +268,7 @@ func (c *Client) Logout(ctx context.Context) error {
 	c.mu.Unlock()
 	c.chats.reset()
 	c.thumbs.reset()
+	c.files.reset()
 	if restart != nil {
 		restart()
 	}

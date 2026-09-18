@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -54,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/chats", s.chats)
 	mux.HandleFunc("GET /api/chats/{ref}/media", s.media)
 	mux.HandleFunc("GET /api/thumb/{ref}/{id}", s.thumb)
+	mux.HandleFunc("GET /api/stream/{ref}/{id}", s.stream)
 
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("POST /api/jobs", s.createJobs)
@@ -250,6 +252,40 @@ func (s *Server) thumb(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// stream serves a message's file with HTTP range support so the browser's <video> can play and seek before download.
+func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
+	ref := r.PathValue("ref")
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if !tgc.ValidRef(ref) || err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	ctx := r.Context()
+	info, err := s.TG.OpenMedia(ctx, ref, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	start, end, partial, err := tgc.ParseRange(r.Header.Get("Range"), info.Size)
+	h := w.Header()
+	h.Set("Accept-Ranges", "bytes")
+	h.Set("Cache-Control", "no-store")
+	if err != nil {
+		h.Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size))
+		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	h.Set("Content-Type", info.Mime)
+	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	if partial {
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size))
+		w.WriteHeader(http.StatusPartialContent)
+	}
+	if err := s.TG.ReadRange(ctx, ref, id, start, end, w); err != nil && ctx.Err() == nil {
+		s.Log.Warn("stream", zap.String("ref", ref), zap.Int("msg", id), zap.Error(err))
+	}
+}
+
 // ---- jobs ----
 
 func (s *Server) listJobs(w http.ResponseWriter, _ *http.Request) {
@@ -257,11 +293,12 @@ func (s *Server) listJobs(w http.ResponseWriter, _ *http.Request) {
 }
 
 type jobRequest struct {
-	Ref    string   `json:"ref"`
-	IDs    []int    `json:"ids"`
-	All    bool     `json:"all"`
-	Filter string   `json:"filter"`
-	Links  []string `json:"links"`
+	Ref    string    `json:"ref"`
+	IDs    []int     `json:"ids"`
+	All    bool      `json:"all"`
+	Filter string    `json:"filter"`
+	Match  tgc.Range `json:"match"`
+	Links  []string  `json:"links"`
 }
 
 func (s *Server) createJobs(w http.ResponseWriter, r *http.Request) {
@@ -299,7 +336,7 @@ func (s *Server) specsFor(ctx context.Context, req jobRequest) ([]jobs.Spec, err
 		if len(req.IDs) > 100_000 {
 			return nil, errors.New("一次最多选 100000 条")
 		}
-		return []jobs.Spec{{Ref: req.Ref, IDs: req.IDs, All: req.All, Filter: req.Filter}}, nil
+		return []jobs.Spec{{Ref: req.Ref, IDs: req.IDs, All: req.All, Filter: req.Filter, Match: req.Match}}, nil
 	}
 	if len(req.Links) > 1000 {
 		return nil, errors.New("一次最多粘贴 1000 条链接")

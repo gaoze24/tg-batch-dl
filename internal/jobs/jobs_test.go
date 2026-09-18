@@ -33,7 +33,7 @@ func (f fakeSource) Peer(_ context.Context, ref string) (tgc.Chat, error) {
 	return tgc.Chat{}, tgc.ErrUnknownChat
 }
 
-func (f fakeSource) ListMediaIDs(context.Context, tgc.Chat, string, func(int)) ([]int, error) {
+func (f fakeSource) ListMediaIDs(context.Context, tgc.Chat, string, tgc.Range, func(int)) ([]int, error) {
 	return nil, errors.New("not used")
 }
 
@@ -182,7 +182,7 @@ func TestPersistAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	m1.Cancel(cancelled.ID)
-	queued, err := m1.Submit(context.Background(), Spec{Ref: "c1", All: true, Filter: "video"})
+	queued, err := m1.Submit(context.Background(), Spec{Ref: "c1", All: true, Filter: "video", Match: tgc.Range{MinSize: 1 << 20}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestPersistAndRestart(t *testing.T) {
 		t.Errorf("restart spec = %+v, %v", spec, err)
 	}
 	spec, err = m2.RestartSpec(queued.ID)
-	if err != nil || !spec.All || spec.Filter != "video" {
+	if err != nil || !spec.All || spec.Filter != "video" || spec.Match.MinSize != 1<<20 {
 		t.Errorf("restart spec for all = %+v, %v", spec, err)
 	}
 	next, err := m2.Submit(context.Background(), spec)

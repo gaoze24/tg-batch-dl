@@ -83,6 +83,13 @@ func TestGuard(t *testing.T) {
 	if rec := do(h, "GET", "/api/thumb/c1/5", "", map[string]string{"Sec-Fetch-Site": "same-origin"}); rec.Code != http.StatusNotFound {
 		t.Errorf("thumb: %d", rec.Code)
 	}
+	// same for <video> streaming, but never from another site
+	if rec := do(h, "GET", "/api/stream/c1/5", "", map[string]string{"Sec-Fetch-Site": "same-origin", "Range": "bytes=0-"}); rec.Code != http.StatusNotFound {
+		t.Errorf("stream: %d", rec.Code)
+	}
+	if rec := do(h, "GET", "/api/stream/c1/5", "", map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+		t.Errorf("cross-site stream: %d", rec.Code)
+	}
 }
 
 func TestIndexServed(t *testing.T) {

@@ -39,6 +39,25 @@ type MediaItem struct {
 	Downloaded bool   `json:"downloaded"`
 }
 
+// Range narrows media by file size and, for videos, duration. Zero bounds are open.
+type Range struct {
+	MinSize     int64   `json:"min_size,omitempty"`
+	MaxSize     int64   `json:"max_size,omitempty"`
+	MinDuration float64 `json:"min_duration,omitempty"` // seconds
+	MaxDuration float64 `json:"max_duration,omitempty"`
+}
+
+// Match reports whether item falls inside r. Duration bounds only apply to videos.
+func (r Range) Match(it MediaItem) bool {
+	if (r.MinSize > 0 && it.Size < r.MinSize) || (r.MaxSize > 0 && it.Size > r.MaxSize) {
+		return false
+	}
+	if it.Kind == "video" && ((r.MinDuration > 0 && it.Duration < r.MinDuration) || (r.MaxDuration > 0 && it.Duration > r.MaxDuration)) {
+		return false
+	}
+	return true
+}
+
 type MediaPage struct {
 	Items      []MediaItem `json:"items"`
 	NextOffset int         `json:"next_offset"` // 0 = no more
@@ -125,8 +144,8 @@ func (c *Client) Media(ctx context.Context, ref, filter string, offsetID, limit 
 	return page, nil
 }
 
-// ListMediaIDs collects every media message id in the chat matching filter, oldest first.
-func (c *Client) ListMediaIDs(ctx context.Context, chat Chat, filter string, progress func(n int)) ([]int, error) {
+// ListMediaIDs collects every media message id in the chat matching filter and r, oldest first.
+func (c *Client) ListMediaIDs(ctx context.Context, chat Chat, filter string, r Range, progress func(n int)) ([]int, error) {
 	api, _, err := c.Session()
 	if err != nil {
 		return nil, err
@@ -140,7 +159,7 @@ func (c *Client) ListMediaIDs(ctx context.Context, chat Chat, filter string, pro
 		}
 		for _, m := range msgs {
 			if msg, ok := m.(*tg.Message); ok {
-				if _, ok := tmedia.GetMedia(msg); ok {
+				if item, _, ok := mediaItem(msg); ok && r.Match(item) {
 					ids = append(ids, msg.ID)
 				}
 			}
