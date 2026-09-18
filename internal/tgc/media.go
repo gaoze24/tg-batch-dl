@@ -202,15 +202,9 @@ func FetchMessages(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, 
 
 // mediaItem describes msg for the grid and picks a thumbnail; false if it has nothing downloadable.
 func mediaItem(msg *tg.Message) (MediaItem, *thumbRef, bool) {
-	media, ok := msg.GetMedia()
-	if !ok {
-		return MediaItem{}, nil, false
-	}
-	item := MediaItem{ID: msg.ID, Date: msg.Date, Caption: truncate(msg.Message, maxCaptionLen)}
-	if g, ok := msg.GetGroupedID(); ok {
-		item.GroupedID = g
-	}
-	switch m := media.(type) {
+	// read fields directly: gotd's GetX() also consults msg.Flags, which only decoded messages have set
+	item := MediaItem{ID: msg.ID, Date: msg.Date, Caption: truncate(msg.Message, maxCaptionLen), GroupedID: msg.GroupedID}
+	switch m := msg.Media.(type) {
 	case *tg.MessageMediaDocument:
 		doc, ok := m.Document.(*tg.Document)
 		if !ok {

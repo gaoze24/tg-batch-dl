@@ -152,6 +152,7 @@ func NewManager(src Source, settings func() config.Settings, log *zap.Logger) *M
 
 // Submit queues a job; the chat must be known (joined, or resolved from a link).
 func (m *Manager) Submit(ctx context.Context, spec Spec) (View, error) {
+	spec.IDs = dedupe(spec.IDs)
 	if !spec.All && len(spec.IDs) == 0 {
 		return View{}, errors.New("没有选择要下载的消息")
 	}
@@ -162,7 +163,6 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	spec.IDs = dedupe(spec.IDs)
 	dest := filepath.Join(m.settings().DownloadDir, fsname.ChatDir(chat.Title, spec.Ref))
 
 	m.mu.Lock()

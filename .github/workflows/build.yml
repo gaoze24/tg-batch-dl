@@ -29,9 +29,8 @@ jobs:
         run: |
           go mod tidy
           go mod verify
-          if ! git diff --quiet -- go.mod go.sum; then
-            echo "::warning::go.mod/go.sum changed during tidy; commit the files from the go-module-files artifact"
-          fi
+          # dependencies are pinned by the committed go.sum; fail if anything drifted
+          git diff --exit-code -- go.mod go.sum
 
       - name: Vet
         run: go vet ./...
