@@ -91,6 +91,14 @@ func (it *iter) Next(ctx context.Context) bool {
 func (it *iter) Value() downloader.Elem { return it.cur }
 func (it *iter) Err() error             { return nil }
 
+// remaining lists the ids the downloader never asked for.
+func (it *iter) remaining() []int {
+	if it.pos >= len(it.ids) {
+		return nil
+	}
+	return it.ids[it.pos:]
+}
+
 type elem struct {
 	id    int64
 	msgID int

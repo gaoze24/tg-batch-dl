@@ -49,7 +49,12 @@ func (p *progress) OnDone(e downloader.Elem, err error) {
 	switch {
 	case err != nil:
 		_ = os.Remove(part)
-		if !errors.Is(err, context.Canceled) {
+		switch {
+		case p.m.stopped(p.j):
+			// the user cancelled the job; not a failure
+		case errors.Is(err, context.Canceled):
+			p.m.fileFailed(p.j, el.msgID, "连接中断")
+		default:
 			p.m.fileFailed(p.j, el.msgID, err.Error())
 		}
 	case closeErr != nil:

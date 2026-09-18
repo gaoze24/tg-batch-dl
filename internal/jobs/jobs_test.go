@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func newTestManager(t *testing.T) (*Manager, string) {
 	src := fakeSource{chats: map[string]tgc.Chat{"c1": {Ref: "c1", Title: "My: Channel"}}}
 	settings := config.Defaults()
 	settings.DownloadDir = dir
-	return NewManager(src, func() config.Settings { return settings }, zap.NewNop()), dir
+	return NewManager(src, func() config.Settings { return settings }, zap.NewNop(), ""), dir
 }
 
 func TestSubmitCancelClear(t *testing.T) {
@@ -142,11 +143,17 @@ func TestProgressOnDone(t *testing.T) {
 		t.Errorf("incomplete file must not be published: %v", err)
 	}
 
-	cancelled := newElem(t, dir, 3, 12, 100, 10)
-	p.OnAdd(cancelled)
-	p.OnDone(cancelled, context.Canceled)
+	// gotd reports a dropped connection as context.Canceled: that's a failure unless the user cancelled
+	dropped := newElem(t, dir, 3, 12, 100, 10)
+	p.OnAdd(dropped)
+	p.OnDone(dropped, fmt.Errorf("rpcDoRequest: %w", context.Canceled))
 
-	if j.done != 1 || j.finished != 100 || j.failed != 1 || len(j.failedID) != 1 || j.failedID[0] != 11 {
+	j.stopped = true
+	userCancel := newElem(t, dir, 4, 13, 100, 10)
+	p.OnAdd(userCancel)
+	p.OnDone(userCancel, context.Canceled)
+
+	if j.done != 1 || j.finished != 100 || j.failed != 2 || fmt.Sprint(j.failedID) != "[11 12]" {
 		t.Errorf("counters: done=%d finished=%d failed=%d ids=%v", j.done, j.finished, j.failed, j.failedID)
 	}
 	if len(j.active) != 0 {
@@ -156,7 +163,84 @@ func TestProgressOnDone(t *testing.T) {
 	j.status = StatusDone
 	m.jobs[j.id] = j
 	spec, err := m.RetrySpec("j")
-	if err != nil || len(spec.IDs) != 1 || spec.IDs[0] != 11 {
+	if err != nil || fmt.Sprint(spec.IDs) != "[11 12]" {
 		t.Errorf("retry spec = %+v, %v", spec, err)
+	}
+}
+
+func TestPersistAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.json")
+	src := fakeSource{chats: map[string]tgc.Chat{"c1": {Ref: "c1", Title: "Chan"}}}
+	settings := config.Defaults()
+	settings.DownloadDir = dir
+	get := func() config.Settings { return settings }
+
+	m1 := NewManager(src, get, zap.NewNop(), path)
+	cancelled, err := m1.Submit(context.Background(), Spec{Ref: "c1", IDs: []int{5, 6, 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1.Cancel(cancelled.ID)
+	queued, err := m1.Submit(context.Background(), Spec{Ref: "c1", All: true, Filter: "video"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "restart the program"
+	m2 := NewManager(src, get, zap.NewNop(), path)
+	views := m2.Views()
+	if len(views) != 2 || views[0].ID != queued.ID || views[1].ID != cancelled.ID {
+		t.Fatalf("restored views: %+v", views)
+	}
+	if views[0].Status != StatusInterrupted || !views[0].CanRestart {
+		t.Errorf("unfinished job should come back interrupted and restartable: %+v", views[0])
+	}
+	if views[1].Status != StatusCancelled || !views[1].CanRestart {
+		t.Errorf("cancelled job: %+v", views[1])
+	}
+	spec, err := m2.RestartSpec(cancelled.ID)
+	if err != nil || fmt.Sprint(spec.IDs) != "[5 6 7]" || spec.Ref != "c1" {
+		t.Errorf("restart spec = %+v, %v", spec, err)
+	}
+	spec, err = m2.RestartSpec(queued.ID)
+	if err != nil || !spec.All || spec.Filter != "video" {
+		t.Errorf("restart spec for all = %+v, %v", spec, err)
+	}
+	next, err := m2.Submit(context.Background(), spec)
+	if err != nil || next.ID == queued.ID || next.ID == cancelled.ID {
+		t.Errorf("resubmitted job %+v, %v (ids must not collide)", next, err)
+	}
+}
+
+func TestMarkDownloaded(t *testing.T) {
+	root := t.TempDir()
+	chat := tgc.Chat{Ref: "c1", Title: "Chan"}
+	dir := ChatDest(root, chat)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "1_a.mp4"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items := []tgc.MediaItem{
+		{ID: 1, FileName: "1_a.mp4", Size: 5},
+		{ID: 1, FileName: "1_a.mp4", Size: 9}, // same name, different size: partial or different file
+		{ID: 2, FileName: "2_b.mp4", Size: 5},
+	}
+	MarkDownloaded(root, chat, items)
+	if !items[0].Downloaded || items[1].Downloaded || items[2].Downloaded {
+		t.Errorf("downloaded flags: %v %v %v", items[0].Downloaded, items[1].Downloaded, items[2].Downloaded)
+	}
+}
+
+func TestIterRemaining(t *testing.T) {
+	it := &iter{ids: []int{1, 2, 3}, pos: 1}
+	if fmt.Sprint(it.remaining()) != "[2 3]" {
+		t.Errorf("remaining = %v", it.remaining())
+	}
+	it.pos = 3
+	if it.remaining() != nil {
+		t.Errorf("remaining after end = %v", it.remaining())
 	}
 }

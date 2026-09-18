@@ -142,14 +142,14 @@ func (c *Client) runOnce(ctx context.Context) error {
 		SessionStorage: &session.FileStorage{Path: c.sessionPath},
 		UpdateHandler:  disp,
 		Device:         tutil.Device,
-		Middlewares:    []telegram.Middleware{floodWait(c.log)},
+		Middlewares:    middlewares(c.log),
 		RetryInterval:  5 * time.Second,
 		MaxRetries:     5,
 		DialTimeout:    15 * time.Second,
 	})
 
 	return client.Run(ctx, func(ctx context.Context) error {
-		pool := dcpool.NewPool(client, poolSize, floodWait(c.log))
+		pool := dcpool.NewPool(client, poolSize, middlewares(c.log)...)
 		defer func() { _ = pool.Close() }()
 
 		status, err := client.Auth().Status(ctx)

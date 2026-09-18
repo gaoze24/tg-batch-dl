@@ -10,6 +10,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/iyear/tdl/core/tmedia"
 	"github.com/iyear/tdl/core/util/tutil"
+
+	"github.com/gaoze24/tg-batch-dl/internal/fsname"
 )
 
 const (
@@ -32,6 +34,9 @@ type MediaItem struct {
 	Height    int     `json:"height,omitempty"`
 	Thumb     bool    `json:"thumb"`
 	GroupedID int64   `json:"grouped_id,omitempty"`
+	// FileName is the name the file gets on disk (see fsname.File); Downloaded is filled in by the caller.
+	FileName   string `json:"file_name"`
+	Downloaded bool   `json:"downloaded"`
 }
 
 type MediaPage struct {
@@ -224,6 +229,7 @@ func mediaItem(msg *tg.Message) (MediaItem, *thumbRef, bool) {
 		}
 		thumb := docThumb(doc)
 		item.Thumb = thumb != nil
+		item.FileName = fsname.File(msg.ID, item.Name, msg.Message, HasOwnFileName(msg))
 		return item, thumb, true
 	case *tg.MessageMediaPhoto:
 		photo, ok := m.Photo.(*tg.Photo)
@@ -238,6 +244,7 @@ func mediaItem(msg *tg.Message) (MediaItem, *thumbRef, bool) {
 		item.Width, item.Height = largestDims(photo.Sizes)
 		thumb := photoThumb(photo)
 		item.Thumb = thumb != nil
+		item.FileName = fsname.File(msg.ID, item.Name, msg.Message, false)
 		return item, thumb, true
 	}
 	return MediaItem{}, nil, false

@@ -29,7 +29,7 @@ func newHandler(t *testing.T) http.Handler {
 		Version: "test",
 		Port:    testPort,
 		TG:      client,
-		Jobs:    jobs.NewManager(client, store.Get, zap.NewNop()),
+		Jobs:    jobs.NewManager(client, store.Get, zap.NewNop(), ""),
 		Config:  store,
 		Log:     zap.NewNop(),
 	}

@@ -31,13 +31,16 @@ const (
 	StatusDone        Status = "done"
 	StatusFailed      Status = "failed"
 	StatusCancelled   Status = "cancelled"
+	StatusInterrupted Status = "interrupted" // the program exited while the job was queued or running
 
-	maxErrors = 50
-	queueSize = 256
+	maxErrors  = 50
+	queueSize  = 256
+	autoPasses = 2 // first pass + one automatic retry of the files that failed
+	retryPause = 5 * time.Second
 )
 
 func (s Status) finished() bool {
-	return s == StatusDone || s == StatusFailed || s == StatusCancelled
+	return s == StatusDone || s == StatusFailed || s == StatusCancelled || s == StatusInterrupted
 }
 
 // Source is the part of the Telegram client that jobs need.
@@ -77,6 +80,8 @@ type View struct {
 	Dest       string     `json:"dest"`
 	CreatedAt  int64      `json:"created_at"`
 	FinishedAt int64      `json:"finished_at,omitempty"`
+	CanRetry   bool       `json:"can_retry"`   // finished with failed files
+	CanRestart bool       `json:"can_restart"` // finished without completing everything
 	seq        int
 }
 
@@ -118,12 +123,16 @@ func (j *job) bytes() int64 {
 }
 
 func (j *job) view() View {
+	fin := j.status.finished()
 	v := View{
 		ID: j.id, Title: j.title, Status: j.status, Message: j.message,
 		Total: j.total, Done: j.done, Existing: j.existing, Failed: j.failed,
 		BytesDone: j.bytes(), Speed: j.speed, Dest: j.dest,
 		Active: []FileView{}, Errors: append([]string{}, j.errors...),
-		CreatedAt: j.created.Unix(), seq: j.seq,
+		CreatedAt:  j.created.Unix(),
+		CanRetry:   fin && len(j.failedID) > 0,
+		CanRestart: fin && j.status != StatusDone,
+		seq:        j.seq,
 	}
 	if !j.ended.IsZero() {
 		v.FinishedAt = j.ended.Unix()
@@ -139,6 +148,7 @@ type Manager struct {
 	src      Source
 	settings func() config.Settings
 	log      *zap.Logger
+	path     string // jobs.json; empty = don't persist
 
 	mu    sync.Mutex
 	jobs  map[string]*job
@@ -146,8 +156,27 @@ type Manager struct {
 	queue chan string
 }
 
-func NewManager(src Source, settings func() config.Settings, log *zap.Logger) *Manager {
-	return &Manager{src: src, settings: settings, log: log, jobs: map[string]*job{}, queue: make(chan string, queueSize)}
+// NewManager restores saved jobs from path (if any). Jobs that were unfinished when the program exited come back as
+// "interrupted" so they can be restarted with one click.
+func NewManager(src Source, settings func() config.Settings, log *zap.Logger, path string) *Manager {
+	m := &Manager{src: src, settings: settings, log: log, path: path, jobs: map[string]*job{}, queue: make(chan string, queueSize)}
+	m.load()
+	return m
+}
+
+// ChatDest is the folder a chat's files are saved in.
+func ChatDest(root string, chat tgc.Chat) string {
+	return filepath.Join(root, fsname.ChatDir(chat.Title, chat.Ref))
+}
+
+// MarkDownloaded flags items whose file already exists with the expected size.
+func MarkDownloaded(root string, chat tgc.Chat, items []tgc.MediaItem) {
+	dir := ChatDest(root, chat)
+	for i := range items {
+		if st, err := os.Stat(filepath.Join(dir, items[i].FileName)); err == nil && st.Size() == items[i].Size {
+			items[i].Downloaded = true
+		}
+	}
 }
 
 // Submit queues a job; the chat must be known (joined, or resolved from a link).
@@ -163,7 +192,6 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	dest := filepath.Join(m.settings().DownloadDir, fsname.ChatDir(chat.Title, spec.Ref))
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -173,7 +201,7 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (View, error) {
 		seq:     m.seq,
 		spec:    spec,
 		title:   chat.Title,
-		dest:    dest,
+		dest:    ChatDest(m.settings().DownloadDir, chat),
 		status:  StatusQueued,
 		total:   len(spec.IDs),
 		active:  map[int64]*activeFile{},
@@ -185,6 +213,7 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (View, error) {
 		return View{}, errors.New("排队的任务太多了，请稍后再试")
 	}
 	m.jobs[j.id] = j
+	m.saveLocked()
 	return j.view(), nil
 }
 
@@ -223,7 +252,7 @@ func (m *Manager) Cancel(id string) (View, bool) {
 	if !j.status.finished() {
 		j.stopped = true
 		if j.status == StatusQueued {
-			m.end(j, StatusCancelled, "已取消")
+			m.endLocked(j, StatusCancelled, "已取消")
 		} else if j.cancel != nil {
 			j.cancel()
 		}
@@ -231,7 +260,7 @@ func (m *Manager) Cancel(id string) (View, bool) {
 	return j.view(), true
 }
 
-// RetrySpec returns a spec covering the files that failed in job id.
+// RetrySpec covers only the files that failed in job id.
 func (m *Manager) RetrySpec(id string) (Spec, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -243,6 +272,22 @@ func (m *Manager) RetrySpec(id string) (Spec, error) {
 		return Spec{}, errors.New("这个任务没有可重试的失败文件")
 	}
 	return Spec{Ref: j.spec.Ref, IDs: append([]int(nil), j.failedID...)}, nil
+}
+
+// RestartSpec repeats the whole job; files already on disk are skipped when it runs.
+func (m *Manager) RestartSpec(id string) (Spec, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return Spec{}, errors.New("任务不存在")
+	}
+	if !j.status.finished() {
+		return Spec{}, errors.New("任务还在进行中")
+	}
+	s := j.spec
+	s.IDs = append([]int(nil), s.IDs...)
+	return s, nil
 }
 
 func (m *Manager) Dest(id string) (string, bool) {
@@ -265,6 +310,7 @@ func (m *Manager) ClearFinished() int {
 			n++
 		}
 	}
+	m.saveLocked()
 	return n
 }
 
@@ -276,7 +322,7 @@ func (m *Manager) Run(ctx context.Context) {
 			m.mu.Lock()
 			for _, j := range m.jobs {
 				if !j.status.finished() {
-					m.end(j, StatusCancelled, "程序已退出")
+					m.endLocked(j, StatusInterrupted, "程序退出时中断了，可以点「重新开始」")
 				}
 			}
 			m.mu.Unlock()
@@ -294,30 +340,42 @@ func (m *Manager) Run(ctx context.Context) {
 			m.mu.Unlock()
 
 			err := m.run(jctx, j)
+			shutdown := ctx.Err() != nil
 			cancel()
-			m.finish(j, err)
+			m.finish(j, err, shutdown)
 		}
 	}
 }
 
-// end must be called with m.mu held.
-func (m *Manager) end(j *job, s Status, msg string) {
+// endLocked must be called with m.mu held.
+func (m *Manager) endLocked(j *job, s Status, msg string) {
 	j.status, j.message, j.ended, j.speed, j.cancel = s, msg, time.Now(), 0, nil
+	m.saveLocked()
 }
 
-func (m *Manager) finish(j *job, err error) {
+func (m *Manager) finish(j *job, err error, shutdown bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer func() {
+		m.log.Info("job end", zap.String("job", j.id), zap.String("status", string(j.status)),
+			zap.Int("done", j.done), zap.Int("existing", j.existing), zap.Int("failed", j.failed), zap.Ints("failed_ids", j.failedID))
+	}()
+	retryHint := ""
+	if len(j.failedID) > 0 {
+		retryHint = fmt.Sprintf("；%d 个文件没下成功，可以点「重试失败的」", len(j.failedID))
+	}
 	switch {
-	case j.stopped, errors.Is(err, context.Canceled):
-		m.end(j, StatusCancelled, "已取消，已下完的文件会保留")
+	case j.stopped:
+		m.endLocked(j, StatusCancelled, "已取消。已下完的文件会保留，点「重新开始」可以接着下")
+	case shutdown:
+		m.endLocked(j, StatusInterrupted, "程序退出时中断了，可以点「重新开始」")
 	case err != nil:
 		m.log.Warn("job failed", zap.String("job", j.id), zap.Error(err))
-		m.end(j, StatusFailed, "失败："+err.Error())
+		m.endLocked(j, StatusFailed, "失败："+err.Error()+retryHint)
 	case j.failed > 0:
-		m.end(j, StatusDone, fmt.Sprintf("完成，有 %d 个文件失败，可以点「重试失败的」", j.failed))
+		m.endLocked(j, StatusDone, "完成"+retryHint)
 	default:
-		m.end(j, StatusDone, "完成")
+		m.endLocked(j, StatusDone, "完成")
 	}
 }
 
@@ -351,22 +409,63 @@ func (m *Manager) run(ctx context.Context, j *job) error {
 	m.mu.Lock()
 	j.total, j.status, j.message = len(ids), StatusDownloading, ""
 	m.mu.Unlock()
+	m.log.Info("job start", zap.String("job", j.id), zap.String("chat", chat.Ref), zap.Int("files", len(ids)))
 
+	stop := m.trackSpeed(j)
+	defer stop()
+	for pass := 1; ; pass++ {
+		if err := m.pass(ctx, j, api, pool, chat, ids); err != nil {
+			return err
+		}
+		if pass >= autoPasses {
+			return nil
+		}
+		m.mu.Lock()
+		retry := j.failedID
+		if len(retry) > 0 {
+			// forget this pass's failures; files that fail again are recorded again
+			j.failedID, j.failed, j.errors = nil, 0, nil
+			j.message = fmt.Sprintf("有 %d 个文件没下成功，稍后自动重试一次…", len(retry))
+		}
+		m.mu.Unlock()
+		if len(retry) == 0 {
+			return nil
+		}
+		t := time.NewTimer(retryPause)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+		m.mu.Lock()
+		j.message = ""
+		m.mu.Unlock()
+		ids = retry
+	}
+}
+
+// pass downloads ids once. Files that could not be downloaded are recorded on the job; only problems that make the
+// whole job impossible are returned.
+func (m *Manager) pass(ctx context.Context, j *job, api *tg.Client, pool dcpool.Pool, chat tgc.Chat, ids []int) error {
 	s := m.settings()
 	it := &iter{api: api, chat: chat, ids: ids, dir: j.dest, m: m, j: j}
 	d := downloader.New(downloader.Options{Pool: pool, Threads: s.Threads, Iter: it, Progress: &progress{m: m, j: j}})
-
-	stop := m.trackSpeed(j)
-	err = d.Download(logctx.With(ctx, m.log.Named("dl")), s.Limit)
-	stop()
-
+	err := d.Download(logctx.With(ctx, m.log.Named("dl")), s.Limit)
 	if ctx.Err() != nil {
-		return ctx.Err() // user cancel or shutdown; finish() reports it
+		return ctx.Err()
+	}
+	// tdl's downloader stops handing out files as soon as one reports a cancellation; those never started count as failed
+	for _, id := range it.remaining() {
+		m.fileFailed(j, id, "连接中断，还没开始下载")
 	}
 	if it.fatal != nil {
 		return it.fatal
 	}
-	return err
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) trackSpeed(j *job) func() {
@@ -397,6 +496,7 @@ func (m *Manager) trackSpeed(j *job) func() {
 // ---- per-file bookkeeping (called from iter and progress) ----
 
 func (m *Manager) fileFailed(j *job, msgID int, reason string) {
+	m.log.Warn("file failed", zap.String("job", j.id), zap.Int("msg", msgID), zap.String("reason", reason))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j.failed++
@@ -410,4 +510,10 @@ func (m *Manager) fileExisting(j *job) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j.existing++
+}
+
+func (m *Manager) stopped(j *job) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return j.stopped
 }

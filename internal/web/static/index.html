@@ -90,11 +90,12 @@
         <div class="selbar">
           <span id="sel-info"></span>
           <div class="spacer"></div>
+          <button id="btn-select-new" class="btn">全选未下载</button>
           <button id="btn-select-all" class="btn">全选已加载</button>
           <button id="btn-select-none" class="btn">取消选择</button>
           <button id="btn-download" class="btn primary" disabled>下载所选</button>
         </div>
-        <p class="muted small hint">点击卡片选择，按住 Shift 点击可以连续选一段。</p>
+        <p class="muted small hint">点击卡片选择，按住 Shift 点击可以连续选一段。带「已下载」标记的文件再次下载时会自动跳过。</p>
         <div id="grid" class="grid"></div>
         <div id="grid-status" class="grid-status"></div>
         <div id="sentinel"></div>

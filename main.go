@@ -73,7 +73,7 @@ func run(dataFlag string, openBrowser bool) error {
 	defer stop()
 
 	tgClient := tgc.New(filepath.Join(dataDir, "session.json"), settings.Proxy, settings.APIID, settings.APIHash, log.Named("tg"))
-	manager := jobs.NewManager(tgClient, store.Get, log.Named("jobs"))
+	manager := jobs.NewManager(tgClient, store.Get, log.Named("jobs"), filepath.Join(dataDir, "jobs.json"))
 	srv := &http.Server{
 		Handler: (&web.Server{
 			Version: version,

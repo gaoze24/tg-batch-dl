@@ -4,7 +4,9 @@ const $ = (id) => document.getElementById(id);
 
 const KIND_LABEL = { channel: "频道", group: "群组", user: "私聊", bot: "机器人", self: "收藏" };
 const FILTER_LABEL = { video: "视频", media: "图片和视频", photo: "图片", file: "文件" };
-const STATUS_LABEL = { queued: "排队中", listing: "正在列出", downloading: "下载中", done: "完成", failed: "失败", cancelled: "已取消" };
+const STATUS_LABEL = {
+  queued: "排队中", listing: "正在列出", downloading: "下载中", done: "完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
+};
 const ACTIVE = new Set(["queued", "listing", "downloading"]);
 
 const S = {
@@ -290,6 +292,10 @@ function card(item, index) {
     thumb.append(el("span", "ph", item.kind === "video" ? "▶" : item.kind === "photo" ? "▣" : "📄"));
   }
   if (item.kind === "video" && item.duration) thumb.append(el("span", "dur", fmtDur(item.duration)));
+  if (item.downloaded) {
+    thumb.append(el("span", "got", "已下载"));
+    c.classList.add("downloaded");
+  }
   thumb.append(el("span", "check"));
 
   const meta = el("div", "meta");
@@ -369,6 +375,11 @@ function bindMain() {
   $("btn-select-all").addEventListener("click", () => {
     S.items.forEach((_, i) => setSelected(i, true));
     updateSelbar();
+  });
+  $("btn-select-new").addEventListener("click", () => {
+    S.items.forEach((item, i) => setSelected(i, !item.downloaded));
+    updateSelbar();
+    if (!S.done) toast("只包含已经加载出来的文件；往下滚动可以加载更多");
   });
   $("btn-select-none").addEventListener("click", () => {
     S.items.forEach((_, i) => setSelected(i, false));
@@ -458,7 +469,8 @@ function jobNode(j, openDetails) {
     actions.append(b);
   };
   if (ACTIVE.has(j.status)) btn("取消", () => jobAction(`/api/jobs/${j.id}/cancel`, "已取消"));
-  if (!ACTIVE.has(j.status) && j.failed) btn("重试失败的", () => jobAction(`/api/jobs/${j.id}/retry`, "已重新加入下载"));
+  if (j.can_retry) btn("重试失败的", () => jobAction(`/api/jobs/${j.id}/retry`, "已把失败的文件重新加入下载"));
+  if (j.can_restart) btn("重新开始", () => jobAction(`/api/jobs/${j.id}/restart`, "已重新加入下载，下完的文件会自动跳过"));
   btn("打开文件夹", () => jobAction(`/api/jobs/${j.id}/open`));
   node.append(actions);
   return node;

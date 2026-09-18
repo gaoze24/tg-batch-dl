@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/clear", s.clearJobs)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.retryJob)
+	mux.HandleFunc("POST /api/jobs/{id}/restart", s.restartJob)
 	mux.HandleFunc("POST /api/jobs/{id}/open", s.openJob)
 
 	mux.HandleFunc("GET /api/settings", s.getSettings)
@@ -224,6 +225,9 @@ func (s *Server) media(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
+	if chat, err := s.TG.Peer(ctx, ref); err == nil {
+		jobs.MarkDownloaded(s.Config.Get().DownloadDir, chat, page.Items)
+	}
 	writeJSON(w, http.StatusOK, page)
 }
 
@@ -340,7 +344,15 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
-	spec, err := s.Jobs.RetrySpec(r.PathValue("id"))
+	s.resubmit(w, r, s.Jobs.RetrySpec)
+}
+
+func (s *Server) restartJob(w http.ResponseWriter, r *http.Request) {
+	s.resubmit(w, r, s.Jobs.RestartSpec)
+}
+
+func (s *Server) resubmit(w http.ResponseWriter, r *http.Request, specOf func(string) (jobs.Spec, error)) {
+	spec, err := specOf(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
