@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TG 下载器</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">TG 下载器</div>
+  <div class="status" id="status">连接中…</div>
+  <div class="spacer"></div>
+  <button id="btn-links" class="btn" hidden>粘贴链接</button>
+  <button id="btn-jobs" class="btn">下载任务 <span class="badge" id="jobs-badge" hidden></span></button>
+  <button id="btn-settings" class="btn">设置</button>
+  <button id="btn-logout" class="btn" hidden>退出登录</button>
+  <button id="btn-quit" class="btn">退出程序</button>
+</header>
+
+<main>
+  <section id="view-connecting" class="center-view">
+    <div class="spinner"></div>
+    <p id="connecting-text">正在连接 Telegram…</p>
+  </section>
+
+  <section id="view-login" class="center-view" hidden>
+    <div class="card login-card">
+      <h2>登录 Telegram</h2>
+      <div class="tabs" id="login-tabs">
+        <button class="tab active" data-tab="qr">扫码登录</button>
+        <button class="tab" data-tab="phone">手机号登录</button>
+      </div>
+
+      <div id="pane-qr" class="login-pane">
+        <p class="muted">在手机 Telegram 里打开「设置 → 设备 → 连接桌面设备」，扫描下面的二维码。</p>
+        <div class="qr-box">
+          <img id="qr-img" alt="登录二维码" hidden>
+          <button id="btn-qr" class="btn primary">生成二维码</button>
+        </div>
+      </div>
+
+      <div id="pane-phone" class="login-pane" hidden>
+        <label>手机号（带国家区号）<input id="phone" type="tel" placeholder="+6581234567" autocomplete="tel"></label>
+        <button id="btn-phone" class="btn primary">发送验证码</button>
+      </div>
+
+      <div id="pane-code" class="login-pane" hidden>
+        <p class="muted">验证码已经发到你的 Telegram（没有的话会发短信）。</p>
+        <label>验证码<input id="code" inputmode="numeric" autocomplete="one-time-code"></label>
+        <button id="btn-code" class="btn primary">登录</button>
+      </div>
+
+      <div id="pane-password" class="login-pane" hidden>
+        <p class="muted">这个账号开启了两步验证。<span id="pwd-hint"></span></p>
+        <label>两步验证密码<input id="password" type="password" autocomplete="current-password"></label>
+        <button id="btn-password" class="btn primary">确定</button>
+      </div>
+
+      <p id="login-error" class="error" hidden></p>
+      <button id="btn-login-restart" class="btn link" hidden>重新开始</button>
+      <p class="muted small">登录凭证只保存在本机的 tgdl-data 文件夹里，程序只和 Telegram 服务器通信。</p>
+    </div>
+  </section>
+
+  <section id="view-main" class="main-view" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <input id="chat-search" type="search" placeholder="搜索聊天">
+        <button id="btn-refresh-chats" class="btn icon" title="刷新聊天列表">⟳</button>
+      </div>
+      <ul id="chat-list" class="chat-list"></ul>
+    </aside>
+
+    <section class="content">
+      <div id="empty-chat" class="placeholder">从左边选一个聊天</div>
+      <div id="chat-view" hidden>
+        <div class="chat-head">
+          <h2 id="chat-title"></h2>
+          <div class="seg" id="filters">
+            <button data-filter="video" class="active">视频</button>
+            <button data-filter="media">图片和视频</button>
+            <button data-filter="photo">图片</button>
+            <button data-filter="file">文件</button>
+          </div>
+          <div class="spacer"></div>
+          <button id="btn-all" class="btn">下载全部</button>
+        </div>
+        <div class="selbar">
+          <span id="sel-info"></span>
+          <div class="spacer"></div>
+          <button id="btn-select-all" class="btn">全选已加载</button>
+          <button id="btn-select-none" class="btn">取消选择</button>
+          <button id="btn-download" class="btn primary" disabled>下载所选</button>
+        </div>
+        <p class="muted small hint">点击卡片选择，按住 Shift 点击可以连续选一段。</p>
+        <div id="grid" class="grid"></div>
+        <div id="grid-status" class="grid-status"></div>
+        <div id="sentinel"></div>
+      </div>
+    </section>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-head">
+    <h3>下载任务</h3>
+    <div class="spacer"></div>
+    <button id="btn-open-root" class="btn">打开下载目录</button>
+    <button id="btn-clear" class="btn">清除已结束</button>
+    <button id="btn-close-drawer" class="btn icon" title="关闭">✕</button>
+  </div>
+  <div id="job-list" class="job-list"></div>
+</aside>
+
+<dialog id="dlg-settings" class="dialog">
+  <h3>设置</h3>
+  <label>下载目录（完整路径）<input id="set-dir" type="text"></label>
+  <div class="row2">
+    <label>单文件线程数（1-16）<input id="set-threads" type="number" min="1" max="16"></label>
+    <label>同时下载文件数（1-8）<input id="set-limit" type="number" min="1" max="8"></label>
+  </div>
+  <label>代理（可选，socks5://主机:端口）<input id="set-proxy" type="text" placeholder="留空表示直连"></label>
+  <label>本地端口<input id="set-port" type="number" min="1024" max="65535"></label>
+  <details>
+    <summary>自己的 API ID（可选）</summary>
+    <p class="muted small">默认使用 Telegram Desktop 的公开 API ID。更稳妥的做法是在 my.telegram.org 申请自己的，填在这里，重启后重新登录。</p>
+    <div class="row2">
+      <label>api_id<input id="set-api-id" type="number" min="0"></label>
+      <label>api_hash<input id="set-api-hash" type="text" autocomplete="off"></label>
+    </div>
+  </details>
+  <p class="muted small">代理、端口、API ID 改动后需要重启程序才生效。</p>
+  <p id="set-error" class="error" hidden></p>
+  <div class="dialog-actions">
+    <button id="set-cancel" class="btn">取消</button>
+    <button id="set-save" class="btn primary">保存</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-links" class="dialog">
+  <h3>粘贴消息链接</h3>
+  <p class="muted small">每行一个，例如 https://t.me/c/1234567890/42 或 https://t.me/频道用户名/100。私有频道要先加入。</p>
+  <textarea id="links-text" rows="8"></textarea>
+  <p id="links-error" class="error" hidden></p>
+  <div class="dialog-actions">
+    <button id="links-cancel" class="btn">取消</button>
+    <button id="links-submit" class="btn primary">加入下载</button>
+  </div>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+</body>
+</html>

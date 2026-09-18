@@ -1,0 +1,5 @@
+/dist/
+/tgdl-data/
+*.exe
+*.log
+session.json

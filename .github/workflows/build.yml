@@ -1,0 +1,63 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # third-party actions pinned to commit SHAs
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.8"
+          cache: false
+
+      - name: Resolve and verify dependencies
+        run: |
+          go mod tidy
+          go mod verify
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::warning::go.mod/go.sum changed during tidy; commit the files from the go-module-files artifact"
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Check web UI script syntax
+        run: node --check internal/web/static/app.js
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+      - name: Build
+        run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" -o dist/tgdl.exe .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tgdl-windows-amd64
+          path: dist/tgdl.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: go-module-files
+          path: |
+            go.mod
+            go.sum
