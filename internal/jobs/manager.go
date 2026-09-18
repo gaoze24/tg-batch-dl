@@ -1,4 +1,4 @@
-// Package jobs queues downloads and runs them one job at a time with tdl's core downloader.
+// Package jobs queues downloads and runs them one job at a time; files are fetched with a resumable block downloader.
 package jobs
 
 import (
@@ -13,8 +13,7 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/iyear/tdl/core/dcpool"
-	"github.com/iyear/tdl/core/downloader"
-	"github.com/iyear/tdl/core/logctx"
+	"github.com/iyear/tdl/core/tmedia"
 	"go.uber.org/zap"
 
 	"github.com/gaoze24/tg-batch-dl/internal/config"
@@ -89,7 +88,8 @@ type View struct {
 type activeFile struct {
 	name string
 	size int64
-	done int64
+	done int64 // bytes on disk, including ones resumed from an earlier attempt
+	base int64 // bytes already on disk when this attempt started; -1 until the first progress report
 }
 
 type job struct {
@@ -104,7 +104,7 @@ type job struct {
 	done     int
 	existing int
 	failed   int
-	finished int64 // bytes of completed files in this run
+	finished int64 // bytes downloaded by this run for files that completed
 	speed    float64
 	active   map[int64]*activeFile
 	failedID []int
@@ -118,7 +118,7 @@ type job struct {
 func (j *job) bytes() int64 {
 	b := j.finished
 	for _, a := range j.active {
-		b += a.done
+		b += a.done - max(a.base, 0)
 	}
 	return b
 }
@@ -145,11 +145,14 @@ func (j *job) view() View {
 	return v
 }
 
+type fetcherFactory func(api *tg.Client, pool dcpool.Pool, peer tg.InputPeerClass, msgID int, media *tmedia.Media) fetchFunc
+
 type Manager struct {
 	src      Source
 	settings func() config.Settings
 	log      *zap.Logger
 	path     string // jobs.json; empty = don't persist
+	fetcher  fetcherFactory
 
 	mu    sync.Mutex
 	jobs  map[string]*job
@@ -160,7 +163,12 @@ type Manager struct {
 // NewManager restores saved jobs from path (if any). Jobs that were unfinished when the program exited come back as
 // "interrupted" so they can be restarted with one click.
 func NewManager(src Source, settings func() config.Settings, log *zap.Logger, path string) *Manager {
-	m := &Manager{src: src, settings: settings, log: log, path: path, jobs: map[string]*job{}, queue: make(chan string, queueSize)}
+	m := &Manager{
+		src: src, settings: settings, log: log, path: path, jobs: map[string]*job{}, queue: make(chan string, queueSize),
+		fetcher: func(api *tg.Client, pool dcpool.Pool, peer tg.InputPeerClass, msgID int, media *tmedia.Media) fetchFunc {
+			return tgc.Fetcher(api, pool, peer, msgID, media)
+		},
+	}
 	m.load()
 	return m
 }
@@ -367,7 +375,7 @@ func (m *Manager) finish(j *job, err error, shutdown bool) {
 	}
 	switch {
 	case j.stopped:
-		m.endLocked(j, StatusCancelled, "已取消。已下完的文件会保留，点「重新开始」可以接着下")
+		m.endLocked(j, StatusCancelled, "已取消。已下载的部分都会保留，点「重新开始」接着下")
 	case shutdown:
 		m.endLocked(j, StatusInterrupted, "程序退出时中断了，可以点「重新开始」")
 	case err != nil:
@@ -446,25 +454,41 @@ func (m *Manager) run(ctx context.Context, j *job) error {
 	}
 }
 
-// pass downloads ids once. Files that could not be downloaded are recorded on the job; only problems that make the
-// whole job impossible are returned.
+// pass downloads ids once, Limit files at a time. Files that could not be downloaded are recorded on the job; only
+// problems that make the whole job impossible are returned.
 func (m *Manager) pass(ctx context.Context, j *job, api *tg.Client, pool dcpool.Pool, chat tgc.Chat, ids []int) error {
 	s := m.settings()
-	it := &iter{api: api, chat: chat, ids: ids, dir: j.dest, m: m, j: j}
-	d := downloader.New(downloader.Options{Pool: pool, Threads: s.Threads, Iter: it, Progress: &progress{m: m, j: j}})
-	err := d.Download(logctx.With(ctx, m.log.Named("dl")), s.Limit)
+	l := &lister{api: api, chat: chat, ids: ids, dir: j.dest, m: m, j: j}
+	slots := make(chan struct{}, max(1, s.Limit))
+	var wg sync.WaitGroup
+	for {
+		t, ok := l.next(ctx)
+		if !ok {
+			break
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			m.downloadOne(ctx, j, api, pool, chat, t, s.Threads)
+		}()
+	}
+	wg.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	// tdl's downloader stops handing out files as soon as one reports a cancellation; those never started count as failed
-	for _, id := range it.remaining() {
-		m.fileFailed(j, id, "连接中断，还没开始下载")
-	}
-	if it.fatal != nil {
-		return it.fatal
-	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
+	if l.fatal != nil {
+		for _, id := range l.remaining() {
+			m.fileFailed(j, id, "还没开始下载")
+		}
+		return l.fatal
 	}
 	return nil
 }
@@ -511,10 +535,4 @@ func (m *Manager) fileExisting(j *job) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j.existing++
-}
-
-func (m *Manager) stopped(j *job) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return j.stopped
 }

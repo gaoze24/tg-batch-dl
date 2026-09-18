@@ -12,7 +12,6 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/iyear/tdl/core/dcpool"
-	"github.com/iyear/tdl/core/downloader"
 	"github.com/iyear/tdl/core/tmedia"
 	"go.uber.org/zap"
 
@@ -103,68 +102,59 @@ func TestRunFailsWithoutSession(t *testing.T) {
 	t.Fatalf("job %s never failed: %+v", v.ID, m.Views())
 }
 
-func newElem(t *testing.T, dir string, id int64, msgID int, size int64, write int) *elem {
-	t.Helper()
-	final := filepath.Join(dir, "file"+string(rune('a'+id)))
-	f, err := os.Create(final + partExt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write(make([]byte, write)); err != nil {
-		t.Fatal(err)
-	}
-	return &elem{id: id, msgID: msgID, media: &tmedia.Media{Size: size}, f: f, final: final, date: 1700000000}
-}
-
-func TestProgressOnDone(t *testing.T) {
+func TestFileAccounting(t *testing.T) {
 	m, dir := newTestManager(t)
 	j := &job{id: "j", active: map[int64]*activeFile{}, status: StatusDownloading}
-	p := &progress{m: m, j: j}
+	mk := func(msgID int, size int64) *task {
+		return &task{msgID: msgID, media: &tmedia.Media{Size: size}, final: filepath.Join(dir, fmt.Sprintf("%d.mp4", msgID)), date: 1700000000}
+	}
+	ctx := context.Background()
 
-	ok := newElem(t, dir, 1, 10, 100, 100)
-	p.OnAdd(ok)
-	p.OnDownload(ok, downloader.ProgressState{Downloaded: 100, Total: 100})
-	p.OnDone(ok, nil)
-	if _, err := os.Stat(ok.final); err != nil {
-		t.Errorf("complete file not renamed: %v", err)
+	// resumed file: 30 bytes were on disk before this attempt, so only 70 count as new
+	ok := mk(10, 100)
+	if err := os.WriteFile(ok.final, make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if st, _ := os.Stat(ok.final); st != nil && !st.ModTime().Equal(time.Unix(1700000000, 0)) {
-		t.Errorf("mtime = %v", st.ModTime())
+	a := m.startFile(j, ok)
+	m.fileProgress(a, 30)
+	m.fileProgress(a, 100)
+	if got := j.bytes(); got != 70 {
+		t.Errorf("in-flight bytes = %d, want 70", got)
 	}
-
-	short := newElem(t, dir, 2, 11, 100, 40)
-	p.OnAdd(short)
-	p.OnDownload(short, downloader.ProgressState{Downloaded: 40, Total: 100})
-	p.OnDone(short, nil) // tdl reports nil even when parts failed
-	if _, err := os.Stat(short.final + partExt); !os.IsNotExist(err) {
-		t.Errorf("incomplete part file should be removed: %v", err)
-	}
-	if _, err := os.Stat(short.final); !os.IsNotExist(err) {
-		t.Errorf("incomplete file must not be published: %v", err)
+	m.endFile(ctx, j, ok, a, true, nil)
+	if st, err := os.Stat(ok.final); err != nil || !st.ModTime().Equal(time.Unix(1700000000, 0)) {
+		t.Errorf("mtime not set: %v %v", st, err)
 	}
 
-	// gotd reports a dropped connection as context.Canceled: that's a failure unless the user cancelled
-	dropped := newElem(t, dir, 3, 12, 100, 10)
-	p.OnAdd(dropped)
-	p.OnDone(dropped, fmt.Errorf("rpcDoRequest: %w", context.Canceled))
+	bad := mk(11, 100)
+	a = m.startFile(j, bad)
+	m.fileProgress(a, 0)
+	m.endFile(ctx, j, bad, a, false, errors.New("网络连接中断"))
 
-	j.stopped = true
-	userCancel := newElem(t, dir, 4, 13, 100, 10)
-	p.OnAdd(userCancel)
-	p.OnDone(userCancel, context.Canceled)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	stopped := mk(12, 100)
+	a = m.startFile(j, stopped)
+	m.endFile(cancelled, j, stopped, a, false, context.Canceled)
 
-	if j.done != 1 || j.finished != 100 || j.failed != 2 || fmt.Sprint(j.failedID) != "[11 12]" {
-		t.Errorf("counters: done=%d finished=%d failed=%d ids=%v", j.done, j.finished, j.failed, j.failedID)
+	if j.done != 1 || j.finished != 70 || j.failed != 1 || fmt.Sprint(j.failedID) != "[11]" || len(j.active) != 0 {
+		t.Errorf("counters: done=%d finished=%d failed=%d ids=%v active=%d", j.done, j.finished, j.failed, j.failedID, len(j.active))
 	}
-	if len(j.active) != 0 {
-		t.Errorf("active not cleared: %v", j.active)
-	}
-
 	j.status = StatusDone
 	m.jobs[j.id] = j
-	spec, err := m.RetrySpec("j")
-	if err != nil || fmt.Sprint(spec.IDs) != "[11 12]" {
+	if spec, err := m.RetrySpec("j"); err != nil || fmt.Sprint(spec.IDs) != "[11]" {
 		t.Errorf("retry spec = %+v, %v", spec, err)
+	}
+}
+
+func TestListerRemaining(t *testing.T) {
+	l := &lister{ids: []int{1, 2, 3}, pos: 1}
+	if fmt.Sprint(l.remaining()) != "[2 3]" {
+		t.Errorf("remaining = %v", l.remaining())
+	}
+	l.pos = 3
+	if l.remaining() != nil {
+		t.Errorf("remaining after end = %v", l.remaining())
 	}
 }
 
@@ -231,16 +221,5 @@ func TestMarkDownloaded(t *testing.T) {
 	MarkDownloaded(root, chat, items)
 	if !items[0].Downloaded || items[1].Downloaded || items[2].Downloaded {
 		t.Errorf("downloaded flags: %v %v %v", items[0].Downloaded, items[1].Downloaded, items[2].Downloaded)
-	}
-}
-
-func TestIterRemaining(t *testing.T) {
-	it := &iter{ids: []int{1, 2, 3}, pos: 1}
-	if fmt.Sprint(it.remaining()) != "[2 3]" {
-		t.Errorf("remaining = %v", it.remaining())
-	}
-	it.pos = 3
-	if it.remaining() != nil {
-		t.Errorf("remaining after end = %v", it.remaining())
 	}
 }

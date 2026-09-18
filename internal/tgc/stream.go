@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/iyear/tdl/core/dcpool"
 	"github.com/iyear/tdl/core/tmedia"
 )
 
@@ -152,6 +153,39 @@ func (c *Client) ReadRange(ctx context.Context, ref string, id int, start, end i
 		}
 	}
 	return nil
+}
+
+// Fetcher reads 1 MB-aligned blocks of msgID's file from its data center, re-reading the message once to get a fresh
+// file reference when Telegram says the old one expired. Safe for concurrent use.
+func Fetcher(api *tg.Client, pool dcpool.Pool, peer tg.InputPeerClass, msgID int, media *tmedia.Media) func(ctx context.Context, offset int64) ([]byte, error) {
+	var mu sync.Mutex
+	loc := media.InputFileLoc
+	return func(ctx context.Context, offset int64) ([]byte, error) {
+		mu.Lock()
+		cur := loc
+		mu.Unlock()
+		client := pool.Client(ctx, media.DC)
+		b, err := getChunk(ctx, client, cur, offset)
+		if !isFileRefErr(err) {
+			return b, err
+		}
+		msgs, err := FetchMessages(ctx, api, peer, []int{msgID})
+		if err != nil {
+			return nil, err
+		}
+		msg, ok := msgs[msgID]
+		if !ok {
+			return nil, errNoMedia
+		}
+		fresh, ok := tmedia.GetMedia(msg)
+		if !ok {
+			return nil, errNoMedia
+		}
+		mu.Lock()
+		loc = fresh.InputFileLoc
+		mu.Unlock()
+		return getChunk(ctx, client, fresh.InputFileLoc, offset)
+	}
 }
 
 func getChunk(ctx context.Context, api *tg.Client, loc tg.InputFileLocationClass, offset int64) ([]byte, error) {
